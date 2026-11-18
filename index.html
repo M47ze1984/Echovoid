@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ECHOVOID - Audio Reactive Game</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #050505;
+            color: #fff;
+            font-family: 'Courier New', monospace;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            user-select: none;
+        }
+
+        canvas {
+            display: block;
+            box-shadow: 0 0 50px rgba(0, 255, 255, 0.1);
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        .hud {
+            display: flex;
+            justify-content: space-between;
+            font-size: 20px;
+            text-shadow: 0 0 10px cyan;
+        }
+
+        #start-screen, #game-over {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.95);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 10;
+            pointer-events: auto;
+            text-align: center;
+        }
+
+        h1 {
+            font-size: 60px;
+            margin: 0 0 20px 0;
+            color: #0ff;
+            text-shadow: 0 0 20px #0ff, 0 0 40px #0ff;
+            letter-spacing: 10px;
+        }
+
+        p {
+            max-width: 600px;
+            line-height: 1.6;
+            font-size: 16px;
+            color: #aaa;
+            margin-bottom: 30px;
+        }
+
+        button {
+            background: transparent;
+            border: 2px solid #0ff;
+            color: #0ff;
+            padding: 15px 40px;
+            font-size: 20px;
+            font-family: 'Courier New', monospace;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+
+        button:hover {
+            background: #0ff;
+            color: #000;
+            box-shadow: 0 0 20px #0ff;
+        }
+
+        .hidden { display: none !important; }
+
+        #noise-meter-container {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 300px;
+            height: 10px;
+            background: #222;
+            border: 1px solid #444;
+            border-radius: 5px;
+            overflow: hidden;
+        }
+
+        #noise-meter {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #0f0, #ff0, #f00);
+            transition: width 0.05s;
+        }
+        
+        .warning-text {
+            color: #f00;
+            font-weight: bold;
+            animation: blink 0.5s infinite;
+        }
+
+        @keyframes blink {
+            50% { opacity: 0; }
+        }
+    </style>
+</head>
+<body>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <div id="ui-layer">
+        <div class="hud">
+            <div>PUNKTE: <span id="score">0</span></div>
+            <div>ECHOS: <span id="echoes">0</span></div>
+        </div>
+        <div id="noise-meter-container">
+            <div id="noise-meter"></div>
+        </div>
+    </div>
+
+    <div id="start-screen">
+        <h1>ECHOVOID</h1>
+        <p>
+            Du bist gefangen in der absoluten Dunkelheit. Du bist unsichtbar.<br><br>
+            <b>Das Konzept:</b> Nutze dein echtes Mikrofon! Sprich, klatsche oder mache Geräusche, um "Schallwellen" auszusenden. Diese Wellen prallen an Wänden ab und machen sie kurzzeitig sichtbar (Echolot).<br><br>
+            <b>Das Problem:</b> Im Dunkeln lauern Jäger. Sie sind blind, aber sie hören alles. Wenn du zu laut bist, finden sie dich. Sammle die leuchtenden Daten-Knoten, um zu überleben.<br><br>
+            <b>Steuerung:</b> WASD zum Bewegen. MIKROFON zum Sehen.
+        </p>
+        <button id="btn-start">SYSTEM STARTEN & MIKROFON ERLAUBEN</button>
+    </div>
+
+    <div id="game-over" class="hidden">
+        <h1 style="color: #f00; text-shadow: 0 0 20px #f00;">SIGNAL VERLOREN</h1>
+        <p>Die Jäger haben dein Echo gefunden.</p>
+        <p>Endpunktzahl: <span id="final-score" style="color:#0ff; font-size:30px;">0</span></p>
+        <button id="btn-restart">NEUSTART</button>
+    </div>
+
+<script>
+    // --- CANVAS SETUP ---
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    function resize() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // --- AUDIO ENGINE ---
+    let audioContext;
+    let analyser;
+    let microphone;
+    let dataArray;
+    let currentVolume = 0;
+    let isAudioReady = false;
+
+    async function initAudio() {
+        try {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+            microphone = audioContext.createMediaStreamSource(stream);
+            analyser = audioContext.createAnalyser();
+            analyser.fftSize = 512;
+            analyser.smoothingTimeConstant = 0.8;
+            microphone.connect(analyser);
+            dataArray = new Uint8Array(analyser.frequencyBinCount);
+            isAudioReady = true;
+        } catch (err) {
+            alert("Mikrofon-Zugriff verweigert! Das Spiel benötigt dein Mikrofon, um zu funktionieren.");
+            console.error(err);
+        }
+    }
+
+    function getVolume() {
+        if (!isAudioReady) return 0;
+        analyser.getByteFrequencyData(dataArray);
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+            sum += dataArray[i];
+        }
+        return (sum / dataArray.length) / 255; // Normalize 0 to 1
+    }
+
+    // --- GAME STATE ---
+    let gameRunning = false;
+    let score = 0;
+    let echoesCollected = 0;
+    let player = { x: canvas.width/2, y: canvas.height/2, radius: 8, speed: 4 };
+    let waves = [];
+    let enemies = [];
+    let collectibles = [];
+    let walls = [];
+    let keys = {};
+    let lastEnemySpawn = 0;
+    let noiseLevelHistory = 0;
+
+    // --- INPUT ---
+    window.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+    window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+    // --- CLASSES ---
+    class Wave {
+        constructor(x, y, intensity) {
+            this.x = x;
+            this.y = y;
+            this.radius = 0;
+            this.maxRadius = 150 + (intensity * 600); // Louder = further vision
+            this.speed = 8 + (intensity * 5);
+            this.life = 1.0;
+            this.color = intensity > 0.6 ? `rgba(255, 50, 50, ` : `rgba(0, 255, 255, `;
+        }
+        update() {
+            this.radius += this.speed;
+            this.life -= (this.speed / this.maxRadius);
+        }
+        draw() {
+            if (this.life <= 0) return;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+            ctx.strokeStyle = this.color + this.life + ")";
+            ctx.lineWidth = 2 + (this.life * 3);
+            ctx.stroke();
+        }
+    }
+
+    class Enemy {
+        constructor() {
+            // Spawn outside view
+            let angle = Math.random() * Math.PI * 2;
+            let dist = Math.max(canvas.width, canvas.height);
+            this.x = player.x + Math.cos(angle) * dist;
+            this.y = player.y + Math.sin(angle) * dist;
+            this.radius = 12;
+            this.baseSpeed = 1.5;
+            this.speed = this.baseSpeed;
+            this.alertLevel = 0; // 0 = wandering, 1 = hunting
+            this.pulse = 0;
+        }
+        update(volume) {
+            // Enemies react to player's noise
+            this.alertLevel = Math.min(1, this.alertLevel + volume * 0.1);
+            this.alertLevel = Math.max(0, this.alertLevel - 0.005); // Decay alertness
+            
+            this.speed = this.baseSpeed + (this.alertLevel * 4); // Faster when alerted
+            this.pulse += 0.1;
+
+            // Move towards player if alerted, otherwise wander slightly
+            let dx = player.x - this.x;
+            let dy = player.y - this.y;
+            let dist = Math.sqrt(dx*dx + dy*dy);
+
+            if (dist > 0) {
+                // Add some sine wave movement for creepy floating effect
+                let moveAngle = Math.atan2(dy, dx) + Math.sin(Date.now() * 0.005) * (1 - this.alertLevel);
+                this.x += Math.cos(moveAngle) * this.speed;
+                this.y += Math.sin(moveAngle) * this.speed;
+            }
+
+            // Collision with player
+            if (dist < player.radius + this.radius) {
+                gameOver();
+            }
+        }
+        draw() {
+            // Only visible if a wave hits them or they are very close
+            ctx.save();
+            ctx.translate(this.x, this.y);
+            
+            let glowColor = this.alertLevel > 0.5 ? '#f00' : '#500';
+            ctx.shadowBlur = 10 + Math.sin(this.pulse) * 5;
+            ctx.shadowColor = glowColor;
+            
+            ctx.beginPath();
+            // Draw a jagged shape
+            for(let i=0; i<8; i++) {
+                let r = this.radius + (Math.random() * 4 * this.alertLevel);
+                let a = (i / 8) * Math.PI * 2;
+                if(i===0) ctx.moveTo(Math.cos(a)*r, Math.sin(a)*r);
+                else ctx.lineTo(Math.cos(a)*r, Math.sin(a)*r);
+            }
+            ctx.closePath();
+            ctx.fillStyle = glowColor;
+            ctx.fill();
+            ctx.restore();
+        }
+    }
+
+    class Collectible {
+        constructor() {
+            this.x = Math.random() * (canvas.width - 100) + 50;
+            this.y = Math.random() * (canvas.height - 100) + 50;
+            this.radius = 6;
+            this.bobOffset = Math.random() * Math.PI * 2;
+        }
+        update() {
+            let dx = player.x - this.x;
+            let dy = player.y - this.y;
+            let dist = Math.sqrt(dx*dx + dy*dy);
+            if (dist < player.radius + this.radius + 10) {
+                score += 100;
+                echoesCollected++;
+                document.getElementById('score').innerText = score;
+                document.getElementById('echoes').innerText = echoesCollected;
+                this.respawn();
+            }
+        }
+        draw() {
+            let bob = Math.sin(Date.now() * 0.003 + this.bobOffset) * 5;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y + bob, this.radius, 0, Math.PI * 2);
+            ctx.fillStyle = '#fff';
+            ctx.shadowBlur = 15;
+            ctx.shadowColor = '#0ff';
+            ctx.fill();
+            ctx.shadowBlur = 0;
+        }
+        respawn() {
+            this.x = Math.random() * (canvas.width - 100) + 50;
+            this.y = Math.random() * (canvas.height - 100) + 50;
+        }
+    }
+
+    // --- WALLS (Obstacles that reflect sound visually) ---
+    function generateWalls() {
+        walls = [];
+        for(let i=0; i<10; i++) {
+            walls.push({
+                x: Math.random() * canvas.width,
+                y: Math.random() * canvas.height,
+                w: Math.random() * 100 + 50,
+                h: Math.random() * 20 + 10,
+                visible: 0
+            });
+        }
+    }
+
+    // --- CORE LOGIC ---
+    let lastWaveTime = 0;
+
+    function update() {
+        if (!gameRunning) return;
+
+        // 1. Get Mic Volume
+        currentVolume = getVolume();
+        noiseLevelHistory = noiseLevelHistory * 0.9 + currentVolume * 0.1;
+        
+        // Update UI Meter
+        document.getElementById('noise-meter').style.width = `${currentVolume * 100}%`;
+
+        // 2. Emit Waves based on Volume
+        if (currentVolume > 0.1 && Date.now() - lastWaveTime > 100) {
+            waves.push(new Wave(player.x, player.y, currentVolume));
+            lastWaveTime = Date.now();
+        }
+
+        // 3. Player Movement
+        if (keys['w'] || keys['arrowup']) player.y -= player.speed;
+        if (keys['s'] || keys['arrowdown']) player.y += player.speed;
+        if (keys['a'] || keys['arrowleft']) player.x -= player.speed;
+        if (keys['d'] || keys['arrowright']) player.x += player.speed;
+
+        // Boundaries
+        player.x = Math.max(0, Math.min(canvas.width, player.x));
+        player.y = Math.max(0, Math.min(canvas.height, player.y));
+
+        // 4. Update Waves & Check Wall Collisions
+        for (let i = waves.length - 1; i >= 0; i--) {
+            waves[i].update();
+            
+            // Light up walls if wave hits them
+            walls.forEach(wall => {
+                let dx = (wall.x + wall.w/2) - waves[i].x;
+                let dy = (wall.y + wall.h/2) - waves[i].y;
+                let dist = Math.sqrt(dx*dx + dy*dy);
+                if (Math.abs(dist - waves[i].radius) < 30) {
+                    wall.visible = 1.0;
+                }
+            });
+
+            if (waves[i].life <= 0) waves.splice(i, 1);
+        }
+
+        // 5. Update Walls visibility decay
+        walls.forEach(wall => {
+            wall.visible *= 0.95;
+        });
+
+        // 6. Update Enemies
+        enemies.forEach(enemy => enemy.update(currentVolume));
+
+        // Spawn enemies over time
+        if (Date.now() - lastEnemySpawn > 10000 && enemies.length < 5 + Math.floor(score/500)) {
+            enemies.push(new Enemy());
+            lastEnemySpawn = Date.now();
+        }
+
+        // 7. Update Collectibles
+        collectibles.forEach(c => c.update());
+
+        requestAnimationFrame(update);
+        draw();
+    }
+
+    function draw() {
+        // Clear screen with slight trail effect for atmosphere
+        ctx.fillStyle = 'rgba(5, 5, 5, 0.4)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Draw Walls (Only visible when hit by echo)
+        walls.forEach(wall => {
+            if (wall.visible > 0.05) {
+                ctx.fillStyle = `rgba(0, 255, 255, ${wall.visible * 0.5})`;
+                ctx.fillRect(wall.x, wall.y, wall.w, wall.h);
+                ctx.strokeStyle = `rgba(0, 255, 255, ${wall.visible})`;
+                ctx.strokeRect(wall.x, wall.y, wall.w, wall.h);
+            }
+        });
+
+        // Draw Collectibles
+        collectibles.forEach(c => c.draw());
+
+        // Draw Waves
+        waves.forEach(w => w.draw());
+
+        // Draw Enemies
+        enemies.forEach(e => e.draw());
+
+        // Draw Player (Always faintly visible as a core)
+        ctx.beginPath();
+        ctx.arc(player.x, player.y, player.radius, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255, 255, 255, ${0.3 + currentVolume * 0.7})`;
+        ctx.shadowBlur = 10 + currentVolume * 30;
+        ctx.shadowColor = currentVolume > 0.6 ? '#f00' : '#0ff';
+        ctx.fill();
+        ctx.shadowBlur = 0;
+
+        // Warning overlay if too loud
+        if (currentVolume > 0.7) {
+            ctx.fillStyle = `rgba(255, 0, 0, ${(currentVolume - 0.7) * 0.3})`;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+    }
+
+    function startGame() {
+        document.getElementById('start-screen').classList.add('hidden');
+        document.getElementById('game-over').classList.add('hidden');
+        
+        player.x = canvas.width / 2;
+        player.y = canvas.height / 2;
+        waves = [];
+        enemies = [new Enemy(), new Enemy()];
+        collectibles = [new Collectible(), new Collectible(), new Collectible()];
+        score = 0;
+        echoesCollected = 0;
+        document.getElementById('score').innerText = score;
+        document.getElementById('echoes').innerText = echoesCollected;
+        generateWalls();
+        
+        gameRunning = true;
+        lastEnemySpawn = Date.now();
+        update();
+    }
+
+    function gameOver() {
+        gameRunning = false;
+        document.getElementById('final-score').innerText = score;
+        document.getElementById('game-over').classList.remove('hidden');
+    }
+
+    // --- EVENT LISTENERS ---
+    document.getElementById('btn-start').addEventListener('click', async () => {
+        await initAudio();
+        if(isAudioReady) startGame();
+    });
+
+    document.getElementById('btn-restart').addEventListener('click', () => {
+        startGame();
+    });
+
+</script>
+</body>
+</html>
